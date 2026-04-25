@@ -1,6 +1,8 @@
 import { verifyFreeChoiceness } from "../../services/free-choiceness.mjs";
 import { verifyWellHandledness } from "../../services/well-handledness.mjs";
 import { verifySoundness } from "../../services/soundness/soundness-service.mjs";
+import { verifyImpedanceFreeness } from "../../services/impedance-freeness.mjs";
+import { verifyResetSafeness } from "../../services/reset-safeness.mjs";
 import { Form } from "../../utils.mjs";
 import ModelContext from "../model/ModelContext.mjs";
 
@@ -10,27 +12,7 @@ export default class VerificationsPanelManager {
 
   /** @type {HTMLDivElement} */
   #rootElement;
-  /**
-   * @type {{
-   *  selectors: {
-   *      sources: HTMLSelectElement[],
-   *      sinks: HTMLSelectElement[]
-   *  },
-   *  sections: {
-   *      poi: {
-   *          root: HTMLDivElement
-   *      },
-   *      freeChoiceness: {
-   *          root: HTMLDivElement,
-   *          startButton: HTMLButtonElement,
-   *      },
-   *    wellHandledness: {
-   *          root: HTMLDivElement,
-   *          startButton: HTMLButtonElement,
-   *      }
-   *  }
-   * }}
-   */
+
   #views = {
     selectors: {
       sources: [],
@@ -40,22 +22,19 @@ export default class VerificationsPanelManager {
       poi: {},
       freeChoiceness: {},
       wellHandledness: {},
+      impedanceFreeness: {},
       soundness: {},
+      resetSafeness: {},
     },
   };
 
-  /**
-   * @type {{
-   *      poi: Form,
-   *      freeChoiceness: Form,
-   *      wellHandledness: Form,
-   * }}
-   */
   #forms = {
     poi: null,
     freeChoiceness: null,
+    impedanceFreeness: null,
     soundness: null,
     wellHandledness: null,
+    resetSafeness: null,
   };
 
   /**
@@ -74,6 +53,8 @@ export default class VerificationsPanelManager {
     this.#initializeFreeChoicenessSection();
     this.#initializeWellHandlednessSection();
     this.#initializeSoundnessSection();
+    this.#initializeImpedanceFreenessSection();
+    this.#initializeResetSafenessSection();
   }
 
   #initializeForms() {
@@ -94,13 +75,25 @@ export default class VerificationsPanelManager {
       this.#views.sections.wellHandledness.root
     ).setFieldNames(["source", "sink", "type"]);
 
+    this.#forms.impedanceFreeness = new Form(
+      this.#views.sections.impedanceFreeness.root
+    ).setFieldNames(["source", "sink"]);
+
+    this.#forms.resetSafeness = new Form(
+      this.#views.sections.resetSafeness.root
+    ).setFieldNames(["source", "sink"]);
+
     this.#views.selectors.sources.push(
       this.#forms.freeChoiceness.getFieldElement("source"),
-      this.#forms.wellHandledness.getFieldElement("source")
+      this.#forms.wellHandledness.getFieldElement("source"),
+      this.#forms.impedanceFreeness.getFieldElement("source"),
+      this.#forms.resetSafeness.getFieldElement("source"),
     );
     this.#views.selectors.sinks.push(
       this.#forms.freeChoiceness.getFieldElement("sink"),
-      this.#forms.wellHandledness.getFieldElement("sink")
+      this.#forms.wellHandledness.getFieldElement("sink"),
+      this.#forms.impedanceFreeness.getFieldElement("sink"),
+      this.#forms.resetSafeness.getFieldElement("sink"),
     );
 
     // Soundness form elements
@@ -218,6 +211,58 @@ export default class VerificationsPanelManager {
         result,
         modelSnapshot,
         activityProfile
+      );
+    });
+  }
+
+  #initializeImpedanceFreenessSection() {
+    const sectionRoot = this.#rootElement.querySelector(
+      "[data-section-id='impedance-freeness']"
+    );
+    const sectionViews = this.#views.sections.impedanceFreeness;
+
+    sectionViews.root = sectionRoot;
+    sectionViews.startButton = sectionRoot.querySelector(
+      "button[data-subaction='start']"
+    );
+    sectionViews.startButton.addEventListener("click", () => {
+      const { source, sink } = this.#forms.impedanceFreeness.getValues();
+      if (!source || !sink) return;
+
+      const modelSnapshot = this.context.managers.visualModel.makeCopy();
+      const simpleModel = modelSnapshot.toSimpleModel();
+
+      const result = verifyImpedanceFreeness(simpleModel, source, sink);
+      console.log("Verification complete", result);
+      this.context.managers.workspace.showVerificationResults(
+        result,
+        modelSnapshot
+      );
+    });
+  }
+
+  #initializeResetSafenessSection() {
+    const sectionRoot = this.#rootElement.querySelector(
+      "[data-section-id='reset-safeness']"
+    );
+    const sectionViews = this.#views.sections.resetSafeness;
+
+    sectionViews.root = sectionRoot;
+    sectionViews.startButton = sectionRoot.querySelector(
+      "button[data-subaction='start']"
+    );
+    sectionViews.startButton.addEventListener("click", () => {
+      const { source, sink } = this.#forms.resetSafeness.getValues();
+      if (!source || !sink) return;
+
+      const modelSnapshot = this.context.managers.visualModel.makeCopy();
+      const simpleModel = modelSnapshot.toSimpleModel();
+
+      const result = verifyResetSafeness(simpleModel, source, sink);
+      console.log("Verification complete", result);
+      this.context.managers.workspace.showVerificationResults(
+        result,
+        modelSnapshot
       );
     });
   }

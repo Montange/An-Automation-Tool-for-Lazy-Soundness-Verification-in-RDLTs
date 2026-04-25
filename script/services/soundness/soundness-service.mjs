@@ -12,6 +12,8 @@ import { Soundness } from './utils/soundness.js';
 import { GraphOperations } from './utils/graph-operations.js';
 import { processR2 } from './utils/create_r2.mjs';
 import { utils } from './utils/rdlt-utils.mjs';
+import { verifyImpedanceFreeness } from '../impedance-freeness.mjs';
+import { verifyResetSafeness } from '../reset-safeness.mjs';
 
 function getInBridges(model, arcMap, vertexMap) {
     
@@ -506,29 +508,6 @@ export function verifySoundness(model, source, sink, soundnessNotion) {
                     }
                 });
             }
-
-            // Write the lazy soundness result to localStorage so other panels
-            // (e.g. RDLT-to-PN conversion) can read it regardless of whether
-            // they share the same window/script context.
-            // Also dispatch a CustomEvent for same-context listeners.
-            try {
-                localStorage.setItem('rdlt:lazySoundResult', JSON.stringify({
-                    pass: lazyResult.pass,
-                    casCount: vizData.casSet ? vizData.casSet.length : 0,
-                    message: lazyResult.message,
-                    timestamp: Date.now()
-                }));
-            } catch(e) {
-                console.warn('[soundness-service] localStorage unavailable:', e);
-            }
-            window.dispatchEvent(new CustomEvent('rdlt:lazySoundVerified', {
-                detail: {
-                    pass: lazyResult.pass,
-                    casCount: vizData.casSet ? vizData.casSet.length : 0,
-                    message: lazyResult.message
-                }
-            }));
-
             break;
     }
     
@@ -913,6 +892,43 @@ export function verifySoundness(model, source, sink, soundnessNotion) {
             });
         }
     }
+
+    // ── Parallel Activities check (PAE — Doñoz 2024) ──────────────────────────
+    // Runs only when verifying lazy soundness, appended as its own result tab.
+    // ── Parallel Activities check via Impedance-Freeness + Reset-Safeness ──
+if (soundnessNotion === 'lazy') {
+    const ifResult  = verifyImpedanceFreeness(model, source, sink);
+    const rsResult  = verifyResetSafeness(model, source, sink);
+
+    const ifPass = ifResult?.instances?.[0]?.evaluation?.conclusion?.pass ?? false;
+    const rsPass = rsResult?.instances?.[0]?.evaluation?.conclusion?.pass ?? false;
+
+    // An RDLT has parallel activities iff it is impedance-free AND reset-safe
+    // (Doñoz 2024, Theorem 3.4.3 / Corollary 3.4.4)
+    const hasParallel = ifPass && rsPass;
+
+    lazyInstances.push({
+        name: 'Parallel Activities',
+        evaluation: {
+            conclusion: {
+                pass: hasParallel,
+                title: hasParallel ? 'Has Parallel Activities' : 'No Parallel Activities',
+                description: hasParallel
+                    ? 'The RDLT is impedance-free and reset-safe, therefore its maximal activities are parallel (Doñoz 2024, Theorem 3.4.3).'
+                    : `The RDLT does not have parallel activities: ` +
+                      (!ifPass ? 'not impedance-free' : '') +
+                      (!ifPass && !rsPass ? ' and ' : '') +
+                      (!rsPass ? 'not reset-safe' : '') + '.'
+            },
+            criteria: [
+                { pass: ifPass, description: `Impedance-freeness: ${ifPass ? 'PASS' : 'FAIL'}` },
+                { pass: rsPass, description: `Reset-safeness: ${rsPass ? 'PASS' : 'FAIL'}` },
+            ],
+            violating: { arcs: [], vertices: [] },
+            violatingRemarks: { arcs: {}, vertices: {} }
+        }
+    });
+}
 
     return {
         title: "Soundness Verification",
