@@ -176,6 +176,15 @@ export default class VerificationsPanelManager {
 
       const result = verifySoundness(simpleModel, source, sink, notion);
 
+      // Store lazy soundness result on context so RDLT2PNManager can read it
+      // when converting this model to a Petri Net. Reset to null for other notions
+      // so a stale lazy result from a previous run never bleeds into a new conversion.
+      if (notion === 'lazy') {
+        this.context.lazySoundPass = result?.instances?.[0]?.evaluation?.conclusion?.pass ?? null;
+      } else {
+        this.context.lazySoundPass = null;
+      }
+
       this.context.managers.workspace.showVerificationResults(
         result,
         modelSnapshot

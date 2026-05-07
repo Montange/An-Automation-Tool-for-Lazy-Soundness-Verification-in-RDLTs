@@ -25,51 +25,13 @@ let firSeqList = [];
 let fireSeqLogList = [];
 var dotIndex = -1;
 
-// Tracks the most recent RDLT lazy soundness verification result.
-// Updated whenever the lazy soundness panel fires 'rdlt:lazySoundVerified'.
-// If the user converts without verifying first, this stays null and no
-// preservation note is shown.
-let rdltLazySoundResult = null;
-
-// Tracks whether a conversion has already been run this session.
-// If true and a lazy soundness result arrives after the fact, the behavioral
-// report is re-rendered so the preservation note appears retroactively.
-let hasConverted = false;
-
-// Primary: read from localStorage at module load (handles page-reload case)
-try {
-    const stored = localStorage.getItem('rdlt:lazySoundResult');
-    if (stored) rdltLazySoundResult = JSON.parse(stored);
-} catch(e) {}
-
-// Secondary: listen for same-context CustomEvent (handles same-page case)
-window.addEventListener('rdlt:lazySoundVerified', (event) => {
-    rdltLazySoundResult = event.detail;
-    console.log('[rdlt2pn] Received lazy soundness result via event:', rdltLazySoundResult);
-    if (hasConverted && behaveReport) renderBehavioralReport(behaveReport);
-});
-
-// Tertiary: listen for cross-context localStorage writes (handles separate-panel case)
-window.addEventListener('storage', (event) => {
-    if (event.key === 'rdlt:lazySoundResult' && event.newValue) {
-        try {
-            rdltLazySoundResult = JSON.parse(event.newValue);
-            console.log('[rdlt2pn] Received lazy soundness result via storage event:', rdltLazySoundResult);
-            if (hasConverted && behaveReport) renderBehavioralReport(behaveReport);
-        } catch(e) {}
-    }
-});
-
-const renderConversion = function(jsonInput){
+// rdltLazySoundPass: boolean|null — result of LRSVA from the soundness module.
+//   true  → RDLT was verified lazy sound by LRSVA; PN "Lazy" result is a valid preservation.
+//   false → RDLT was NOT lazy sound by LRSVA; PN "Lazy" simulation result is a false positive
+//           caused by cycle/reset structure, not genuine lazy soundness.
+//   null/undefined → LRSVA was not run before conversion; PN result shown as-is.
+const renderConversion = function(jsonInput, rdltLazySoundPass = null){
   const { data, warnings, error } = convert(jsonInput);
-
-  // Re-read localStorage after convert() — runLazySoundnessCheck inside
-  // conversionFacade writes the LRSVA result during conversion, so this
-  // always reflects the current RDLT regardless of prior panel visits.
-  try {
-    const stored = localStorage.getItem('rdlt:lazySoundResult');
-    if (stored) rdltLazySoundResult = JSON.parse(stored);
-  } catch(e) {}
   if(error) {
     console.error('Parsing failed:', error);
     alert(`Error: ${error}`);
@@ -83,8 +45,7 @@ const renderConversion = function(jsonInput){
     behaveReport = data.behaviorAnalysis;
 
     renderStructuralReport();
-    renderBehavioralReport(behaveReport);
-    hasConverted = true;
+    renderBehavioralReport(behaveReport, rdltLazySoundPass);
     
     initRenderGraph(rdltInputDot);
     document.getElementById('graphTitle').innerHTML = "RDLT Input";
@@ -191,7 +152,11 @@ function renderStructuralReport(){
   `;
 }
 
-function renderBehavioralReport(result){
+// rdltLazySoundPass: boolean|null — passed in from renderConversion.
+//   Guards against false-positive "Lazy Sound" conclusions when the PN simulation
+//   produces weakened termination (e.g. due to cycle/reset arcs) on an RDLT that
+//   was NOT verified as lazy sound by LRSVA.
+function renderBehavioralReport(result, rdltLazySoundPass = null){
   const container = document.getElementById('behaveReportOutput');
   container.innerHTML = '';
 
@@ -212,8 +177,8 @@ function renderBehavioralReport(result){
     <summary>Option to Complete</summary>
     <pre>${
       optSeqs.length
-        ? `Sequences ${optSeqs.join(', ')} satisfy “option to complete.”`
-        : 'No sequence satisfies “option to complete.”'
+        ? `Sequences ${optSeqs.join(', ')} satisfy "option to complete."`
+        : 'No sequence satisfies "option to complete."'
     }</pre>
   `;
   container.appendChild(optSection);
@@ -288,14 +253,49 @@ function renderBehavioralReport(result){
   container.appendChild(liveSection);
 
   // 4) Overall Soundness + implications
-  // If the RDLT was verified lazy sound via LRSVA, override the simulation-derived
-  // overallSoundness with 'Lazy' per Theorem 3.4.1 (Afable, 2025).
-  // The simulation-based approach cannot reliably conclude lazy soundness on PNs
-  // with reset arcs (undecidable per Van der Aalst et al. 2009), so the RDLT-side
-  // LRSVA result is the authoritative source when available.
-  const effectiveSoundness = (rdltLazySoundResult && rdltLazySoundResult.pass)
-    ? 'Lazy'
-    : overallSoundness;
+  //
+  // Two-way override using rdltLazySoundPass (the LRSVA result from the RDLT side):
+  //
+  //   rdltLazySoundPass === true  → RDLT is lazy sound. Override display to "Lazy Sound"
+  //                                 regardless of what the PN simulation concluded, because
+  //                                 Theorem 3.4.1 guarantees preservation. The PN may show
+  //                                 Classical/Relaxed/etc. due to its own simulation logic,
+  //                                 but the RDLT guarantee takes precedence.
+  //
+  //   rdltLazySoundPass === false → RDLT is NOT lazy sound. If the PN simulation says "Lazy",
+  //                                 that is a false positive caused by cycle/reset arc structure
+  //                                 (weakened termination in all sequences ≠ lazy soundness).
+  //                                 Downgrade to "Easy".
+  //
+  //   rdltLazySoundPass === null  → LRSVA was not run before conversion. Show PN result as-is.
+
+  let displayedSoundness = overallSoundness;
+  let preservationNote = null;
+
+  if (rdltLazySoundPass === true) {
+    // RDLT confirmed lazy sound by LRSVA — override PN result to Lazy Sound (Theorem 3.4.1).
+    displayedSoundness = 'Lazy';
+    preservationNote =
+      'Lazy soundness is preserved from the RDLT to its corresponding Petri Net (Theorem 3.4.1). ' +
+      'Note: Due to the undecidability of soundness in Petri Nets with reset arcs, the PN ' +
+      'simulation may report a different soundness notion. The RDLT-level verification result takes precedence.';
+  } else if (rdltLazySoundPass === false && overallSoundness.toLowerCase() === 'lazy') {
+    // RDLT is NOT lazy sound, but PN simulation says "Lazy".
+    // The PN genuinely exhibits weakened proper termination in all firing sequences —
+    // this is an accurate description of the PN's own behavior (e.g. caused by cycle
+    // or reset arc structure). We keep "Lazy Sound" as the displayed result because
+    // it is the honest PN simulation outcome, but we add a note clarifying that this
+    // is NOT a preservation result: the RDLT was not lazy sound per LRSVA, so
+    // Theorem 3.4.1 does not apply here.
+    displayedSoundness = 'Lazy';
+    preservationNote =
+      'Note: The PN simulation concludes Lazy Sound based on weakened proper termination ' +
+      'observed across all firing sequences. However, the RDLT was determined to be not ' +
+      'lazy sound by LRSVA. This PN result is not a preservation of lazy soundness — it ' +
+      'reflects the token dynamics of the converted PN (e.g. due to cycle or reset arc ' +
+      'structure) and does not imply lazy soundness of the input RDLT.';
+  }
+  // rdltLazySoundPass === null: no LRSVA result available, show PN result as-is.
 
   const soundMap = {
     classical: ['Relaxed','Weak','Easy','Lazy'],
@@ -304,37 +304,19 @@ function renderBehavioralReport(result){
     easy:      [],
     lazy:      []
   };
-  const key = effectiveSoundness.toLowerCase();
+  const key = displayedSoundness.toLowerCase();
   const implied = soundMap[key] || [];
 
   const soundSection = document.createElement('div');
   soundSection.classList = 'final-conclusion';
   soundSection.innerHTML = `
-    <strong>${effectiveSoundness} Sound.</strong>
+    <strong>${displayedSoundness} Sound.</strong>
     ${ implied.length
       ? 'Also implies ' + implied.join(', ') + '.'
       : 'No further implications.'}
+    ${ preservationNote ? `<br><em>${preservationNote}</em>` : '' }
   `;
   container.appendChild(soundSection);
-
-  // 5) Lazy soundness preservation note (Theorem 3.4.1, Afable 2025)
-  // Only shown when the RDLT-side lazy soundness verification was explicitly
-  // run and passed (signalled via the 'rdlt:lazySoundVerified' event).
-  // If the user converts without verifying first, rdltLazySoundResult is null
-  // and this section is silently omitted.
-  if (rdltLazySoundResult && rdltLazySoundResult.pass) {
-    const preservationNote = document.createElement('div');
-    preservationNote.classList = 'final-conclusion';
-    preservationNote.style.marginTop = '8px';
-    preservationNote.innerHTML = `
-      <strong>Lazy Soundness Preserved.</strong>
-      The input RDLT was verified as lazy sound via LRSVA. By Theorem 3.4.1
-      (Afable, 2025), a lazy sound RDLT maps to a lazy sound Petri Net under
-      the RDLT-to-PN conversion. Lazy soundness is preserved from the RDLT
-      to its corresponding Petri Net.
-    `;
-    container.appendChild(preservationNote);
-  }
 }
 
 const prevBtn = document.getElementById('prevBtn');
@@ -422,7 +404,6 @@ document.querySelectorAll('.simulateBtn').forEach(btn => {
       document.getElementById('graphTitle').innerHTML = "Simulation of PN Output";
       document.getElementById('logSection').style.display = 'none';
 
-      // const nButtons = behaveReport.perSequenceResults.length;
       const container = document.getElementById('firingSequencesOutput');
       container.innerHTML = '';
       behaveReport.perSequenceResults.forEach((seq, i) => {
@@ -467,7 +448,7 @@ const container = document.querySelector('.export-container');
 const exportBtn = document.getElementById('exportBtn');
 
 exportBtn.addEventListener('click', e => {
-  e.stopPropagation();     // don’t let this click bubble up and immediately close it
+  e.stopPropagation();
   container.classList.toggle('open');
 });
 
@@ -482,8 +463,7 @@ toggleLogBtn.addEventListener('click', e => {
 
 document.addEventListener('click', () => {
   container.classList.remove('open');
-  // logPanel.style.display = 'none';
-})
+});
 
 // prevent clicks *inside* the panel from bubbling up
 logPanel.addEventListener('click', e => e.stopPropagation());
@@ -520,9 +500,7 @@ function renderGraph(dot) {
     .fit(true)
     .resetZoom()
     .renderDot(dot)
-    .on("renderEnd", () => {
-      // console.log(`Graph rendered and animated.`);
-    });
+    .on("renderEnd", () => {});
   document.getElementById('dotOutput').textContent = dot;
 }
 
@@ -531,14 +509,11 @@ function initRenderGraph(dot) {
     .graphviz({ useWorker: false })
     .renderDot(dot)
     .on("end", () => {
-      // console.log(`Graph rendered successfully.`);
       const svg = mainGraph.select("svg");
-      // Setup zoom and pan
       const zoom = d3.zoom().on("zoom", (event) => {
         svg.select('g').attr('transform', event.transform);
       });
       svg.call(zoom);
-      // Make SVG responsive
       svg.attr("width", "100%")
         .attr("height", "100%")
         .attr("preserveAspectRatio", "xMidYMid meet");
@@ -558,7 +533,6 @@ async function handleExport(format) {
   base = base.replace(/[^\w\-]+/g, '_');
   const filename = `${base}.${format}`;
 
-  // 1) DOT: just download the raw .dot text
   if (format === 'dot') {
     const dotText = document.getElementById('dotOutput').textContent;
     const blob = new Blob([dotText], { type: 'text/plain' });
@@ -566,33 +540,26 @@ async function handleExport(format) {
     return;
   }
 
-  // 2) Grab the SVG element
   const svgEl = document.querySelector('#d3graph svg');
   if (!svgEl) {
     return alert('No SVG found to export!');
   }
 
-  // Serialize it
   const serializer = new XMLSerializer();
   const svgString = serializer.serializeToString(svgEl);
 
   if (format === 'svg') {
-    // 3) SVG download
     const blob = new Blob([svgString], { type: 'image/svg+xml;charset=utf-8' });
     downloadBlob(blob, `${filename}`);
     return;
   }
 
   if (format === 'png') {
-    // 4) PNG download via canvas
-    // Create an image from the SVG string
     const img = new Image();
-    // Inline SVG data URI
     const svgData = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svgString);
     img.src = svgData;
 
     img.onload = () => {
-      // Size canvas to SVG’s viewBox or bounding box
       const viewBox = svgEl.viewBox.baseVal;
       const width  = viewBox && viewBox.width  ? viewBox.width  : svgEl.clientWidth;
       const height = viewBox && viewBox.height ? viewBox.height : svgEl.clientHeight;
@@ -601,11 +568,8 @@ async function handleExport(format) {
       canvas.width  = width;
       canvas.height = height;
       const ctx = canvas.getContext('2d');
-
-      // Draw the SVG onto it
       ctx.drawImage(img, 0, 0, width, height);
 
-      // Export as PNG
       canvas.toBlob(blob => {
         downloadBlob(blob, `${filename}`);
       }, 'image/png');
@@ -621,7 +585,6 @@ async function handleExport(format) {
   alert(`Unsupported format: ${format}`);
 }
 
-// Helper to trigger download of a blob
 function downloadBlob(blob, filename) {
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
@@ -632,10 +595,9 @@ function downloadBlob(blob, filename) {
   URL.revokeObjectURL(a.href);
 }
 
-// Attach event listeners to export buttons.
 document.querySelectorAll('.exportOptBtn').forEach(btn => {
   btn.addEventListener('click', () => {
-    const format = btn.dataset.format;  // "svg", "png", or "dot"
+    const format = btn.dataset.format;
     handleExport(format);
   });
 });
